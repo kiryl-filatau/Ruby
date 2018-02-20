@@ -1,161 +1,208 @@
 require 'net/http'
 require 'json'
 
-ADDR='54.165.255.89'
-PORT='8200'
-KEY='afe9b2b52fd57f2e465456698fc46cdd56278ad810d6f0085fcc251d899c8827'
-KB64='r+mytS/Vfy5GVFZpj8Rs3VYnitgQ1vAIX8wlHYmciCc='
-RT='4ec70c21-5e6e-585e-7440-b6c64b8060c7'
-PKI_NAME = "test6_pki"
-ROLE_NAME= "test1_role"
-CERT_CNAME= "test3.example.com"
+class Vault
+  attr_accessor :rt, :kb64
 
-########################### UNSEALING ############################
-def get_health
-  uri = URI("http://#{ADDR}:#{PORT}/v1/sys/health")
-  res = Net::HTTP.get(uri)
-  JSON.parse(res).to_hash
+  def initialize(vault_host, vault_port, pki_name)
+      @uri = URI.parse("http://#{vault_host}:#{vault_port}/v1/")
+      @pki_name = "#{pki_name}"
+  end
+
+################## METHODS ####################
+
+  def unseal!
+    uri = URI.join(@uri, 'sys/unseal')
+    req = Net::HTTP.new(uri.host, uri.port)
+    headers = {"X-Vault-Token" => rt}
+    data = { 'key' => kb64 }.to_json
+    res = req.post(uri, data, headers)
+    JSON.parse(res.body).to_hash
+  end
+
+  def mount_pki!
+    uri = URI.join(@uri,'sys/mounts/', @pki_name)
+    req = Net::HTTP.new(uri.host, uri.port)
+    headers = {"X-Vault-Token" => rt}
+    data = {"type": "pki"}.to_json
+    res = req.post(uri, data, headers)
+  end
+
+  def upload_rootCA!
+    uri = URI.join(@uri, @pki_name + '/config/ca')
+    req = Net::HTTP.new(uri.host, uri.port)
+    headers = {"X-Vault-Token" => rt}
+    data = File.read('rootCA_key.json')
+    res = req.post(uri, data, headers)
+  end
+
+  def create_role!(role_name)
+    uri = URI.join(@uri, @pki_name + "/roles/#{role_name}")
+    req = Net::HTTP.new(uri.host, uri.port)
+    headers = {"X-Vault-Token" => rt}
+    data = {"allowed_domains": ["example.com"],"allow_subdomains": true}.to_json
+    res = req.post(uri, data, headers)
+  end
+ 
+  def issue_cert!(role_name, cert_name)
+    uri = URI.join(@uri, @pki_name + "/issue/#{role_name}")
+    req = Net::HTTP.new(uri.host, uri.port)
+    headers = {"X-Vault-Token" => rt}
+    data = {"common_name": "#{cert_name}"}.to_json
+    res = req.post(uri, data, headers)
+    response = JSON.parse(res.body)
+  end
+
+  def add_cert_to_kv!(cert_name, cert_sn, cert_pem)
+    uri = URI.join(@uri, "secret/#{cert_name}")
+    req = Net::HTTP.new(uri.host, uri.port)
+    headers = {"X-Vault-Token" => rt}
+    data = { "sn"=> "#{cert_sn}", "pem"=> "#{cert_pem}"}.to_json
+    res = req.post(uri, data, headers)
+  end
+
+################### CHECKS #######################
+
+  def health?
+    uri = URI.join(@uri, 'sys/health')
+    res = Net::HTTP.get(uri)
+    JSON.parse(res).to_hash
+  end
+
+  def check_mounts?
+    uri = URI.join(@uri, 'sys/mounts')
+    req = Net::HTTP::Get.new(uri)
+    req['X-Vault-Token'] = rt
+    res = Net::HTTP.start(uri.hostname, uri.port) {|http|
+      http.request(req)
+    }
+    JSON.parse(res.body).to_hash
+  end
+
+  def check_rootCA?
+    uri = URI.join(@uri, @pki_name + '/ca')
+    req = Net::HTTP::Get.new(uri)
+    req['X-Vault-Token'] = rt
+    res = Net::HTTP.start(uri.hostname, uri.port) {|http|
+      http.request(req)
+    }
+  end
+
+  def check_role?
+    uri = URI.join(@uri, @pki_name + '/roles?list=true')
+    req = Net::HTTP::Get.new(uri)
+    req['X-Vault-Token'] = rt
+    res = Net::HTTP.start(uri.hostname, uri.port) {|http|
+      http.request(req)
+    }
+    JSON.parse(res.body).to_hash
+  end
+
+  def check_cert_in_kv?
+    uri = URI.join(@uri, 'secret?list=true')
+    req = Net::HTTP::Get.new(uri)
+    req['X-Vault-Token'] = rt
+    res = Net::HTTP.start(uri.hostname, uri.port) {|http|
+      http.request(req)
+    }
+    JSON.parse(res.body).to_hash
+  end
+
+  def read_cert_from_kv?(cert_cname)
+    uri = URI.join(@uri, "secret/#{cert_cname}")
+    req = Net::HTTP::Get.new(uri)
+    req['X-Vault-Token'] = rt
+    res = Net::HTTP.start(uri.hostname, uri.port) {|http|
+      http.request(req)
+    }
+    JSON.parse(res.body).to_hash
+  end
+
+    def read_cert_from_pki?(cert_sn)
+    uri = URI.join(@uri, @pki_name + "/cert/#{cert_sn}")
+    req = Net::HTTP::Get.new(uri)
+    req['X-Vault-Token'] = rt
+    res = Net::HTTP.start(uri.hostname, uri.port) {|http|
+      http.request(req)
+    }
+    JSON.parse(res.body).to_hash
+  end
 end
 
-def unseal_vault
-  uri = URI.parse("http://#{ADDR}:#{PORT}/v1/sys/unseal")
-  req = Net::HTTP.new(uri.host, uri.port)
-  headers = {"X-Vault-Token" => "#{RT}"}
-  data = {"key": "#{KB64}"}.to_json
-  resp = req.post(uri, data, headers)
-end
 
 
-if get_health["sealed"]
+############### TESTS ###################
+
+
+test_attempt = 21
+
+pki_name = "test#{test_attempt}_pki"
+role_name = "test#{test_attempt}_role"
+cert_cname = "test#{test_attempt}.example.com"
+
+p v = Vault.new('54.165.255.89', 8200, "#{pki_name}")
+v.rt = '4ec70c21-5e6e-585e-7440-b6c64b8060c7'
+v.kb64 = 'r+mytS/Vfy5GVFZpj8Rs3VYnitgQ1vAIX8wlHYmciCc='
+
+
+if v.health?['sealed']
+  v.unseal!
   puts "unsealing..."
-  unseal_vault
 else
   puts "unsealed"
 end
 
-########################### MOUNT PKI ############################
+# p 'HEALTH' 
+# p v.health?['sealed']
+# p "====================="
 
-def check_mounts
-  uri = URI.parse("http://#{ADDR}:#{PORT}/v1/sys/mounts")
-  req = Net::HTTP::Get.new(uri)
-  req['X-Vault-Token'] = "#{RT}"
-  res = Net::HTTP.start(uri.hostname, uri.port) {|http|
-    http.request(req)
-  }
-  JSON.parse(res.body).to_hash
-end
-
-def maunt_pki
-  uri = URI.parse("http://#{ADDR}:#{PORT}/v1/sys/mounts/#{PKI_NAME}")
-  req = Net::HTTP.new(uri.host, uri.port)
-  headers = {"X-Vault-Token" => "#{RT}"}
-  data = {"type": "pki"}.to_json
-  resp = req.post(uri, data, headers)
-end
-
-if check_mounts["#{PKI_NAME}/"].nil? 
+if v.check_mounts?["#{pki_name}/"].nil? 
+  v.mount_pki!
   puts "mounting pki..."
-  maunt_pki
 else
-  puts "mounted"
+  puts "pki mounted"
 end
 
+# p "MOUNTS"
+# p v.check_mounts?["#{pki_name}/"].nil?
+# p "====================="
 
-########################### UPLOAD CA ###########################
-
-
-def check_rootCA
-  uri = URI.parse("http://#{ADDR}:#{PORT}/v1/#{PKI_NAME}/ca")
-  req = Net::HTTP::Get.new(uri)
-  req['X-Vault-Token'] = "#{RT}"
-  res = Net::HTTP.start(uri.hostname, uri.port) {|http|
-    http.request(req)
-  }
-end
-
-
-
-def upload_rootCA
-  uri = URI.parse("http://#{ADDR}:#{PORT}/v1/#{PKI_NAME}/config/ca")
-  req = Net::HTTP.new(uri.host, uri.port)
-  headers = {"X-Vault-Token" => "#{RT}"}
-  data = File.read('rootCA_key.json')
-  resp = req.post(uri, data, headers)
-end
-
-
-if (check_rootCA.to_s).include? "HTTPNoContent"
-  puts "uploading CA..."
-  upload_rootCA
-else
+if (v.check_rootCA?.to_s).include? "HTTPOK"
   puts "CA uploaded"
+else
+  v.upload_rootCA!
+  puts "uploading CA..."
 end
 
-########################### CREATE ROLE #########################
+# p 'ROOTCA'
+# p (v.check_rootCA?.to_s).include? "HTTPOK"
+# p "====================="
 
-def check_role
-  uri = URI.parse("http://#{ADDR}:#{PORT}/v1/#{PKI_NAME}/roles?list=true")
-  req = Net::HTTP::Get.new(uri)
-  req['X-Vault-Token'] = "#{RT}"
-  res = Net::HTTP.start(uri.hostname, uri.port) {|http|
-    http.request(req)
-  }
-  JSON.parse(res.body).to_hash
-end
-
-
-def create_role
-  uri = URI.parse("http://#{ADDR}:#{PORT}/v1/#{PKI_NAME}/roles/#{ROLE_NAME}")
-  req = Net::HTTP.new(uri.host, uri.port)
-  headers = {"X-Vault-Token" => "#{RT}"}
-  data = {"allowed_domains": ["example.com"],"allow_subdomains": true}.to_json
-  resp = req.post(uri, data, headers)
-end
-
-p check_role["errors"]
-
-if check_role["errors"].include? "[]"
-  puts "no roles, creating first"
-  create_role
-elsif check_role["data"]["keys"].include? "#{ROLE_NAME}"
+if (v.check_role?.key? 'data') && (v.check_role?["data"]["keys"].include? "#{role_name}")
   puts "role exists"
 else
+  v.create_role!("#{role_name}")
   puts "creating role..."
-  create_role
 end
 
-######################### ISSUING CERT ##########################
+# p 'ROLE'
+# p (v.check_role?.key? 'data') && (v.check_role?["data"]["keys"].include? "#{role_name}")
+# p "====================="
 
-def check_cert
-  uri = URI.parse("http://#{ADDR}:#{PORT}/v1/#{PKI_NAME}/certs?list=true")
-  req = Net::HTTP::Get.new(uri)
-  req['X-Vault-Token'] = "#{RT}"
-  res = Net::HTTP.start(uri.hostname, uri.port) {|http|
-    http.request(req)
-  }
-  JSON.parse(res.body).to_hash
+if (v.check_cert_in_kv?.key? 'data') && (v.check_cert_in_kv?["data"]["keys"].include? "#{cert_cname}")
+  puts "cert exists"
+  cert_sn = v.read_cert_from_kv?("#{cert_cname}")['data']['sn']
+  cert = v.read_cert_from_pki?("#{cert_sn}")['data']['certificate']
+  cert_pem = v.read_cert_from_kv?("#{cert_cname}")['data']['pem']
+  cert_json = {"pem_bundle"=> "#{cert_pem}#{cert}"}.to_json
+  p cert_json
+else
+  response = v.issue_cert!("#{role_name}", "#{cert_cname}")
+  v.add_cert_to_kv!("#{cert_cname}", response['data']['serial_number'], response['data']['private_key'])
+  puts "adding to kv"
 end
 
+# p 'CERT'
+# p (v.check_cert_in_kv?.key? 'data') && (v.check_cert_in_kv?["data"]["keys"].include? "#{cert_cname}")
+# p "====================="
 
-def issue_cert
-  uri = URI.parse("http://#{ADDR}:#{PORT}/v1/#{PKI_NAME}/issue/#{ROLE_NAME}")
-  req = Net::HTTP.new(uri.host, uri.port)
-  headers = {"X-Vault-Token" => "#{RT}"}
-  data = {"common_name": "#{CERT_CNAME}"}.to_json
-  resp = req.post(uri, data, headers)
-  JSON.parse(resp.body).to_hash
-end
-
-PRIVATE_KEY = issue_cert["data"]["private_key"]
-SERIAL_NUMBER = issue_cert["data"]["serial_number"]
-
-puts "#{SERIAL_NUMBER} => #{PRIVATE_KEY}"
-
-
-
-# if check_role["data"]["keys"].include? "#{ROLE_NAME}"
-#   puts "cert exists"
-# else
-#   puts "issuing cert..."
-#   create_role
-# end
